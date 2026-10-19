@@ -21,6 +21,7 @@ from ddtrace._trace._span_pointer import _SpanPointerDescription
 from ddtrace._trace._span_pointer import _SpanPointerDirection
 from ddtrace._trace._span_pointer import _SpanPointerDirectionName
 from ddtrace._trace.http_tags import set_url_tags_server
+from ddtrace._trace.otel.http.resource import record_initial_instrumentation_resource
 from ddtrace._trace.otel.http.resource import set_instrumentation_resource
 from ddtrace._trace.otel.http.tags import set_method_tag
 from ddtrace._trace.otel.http.tags import set_otel_resource_for_method
@@ -1402,6 +1403,8 @@ def _on_asgi_request(ctx: core.ExecutionContext) -> None:
 
     span = _start_span(ctx)
     ctx.set_item("req_span", span)
+    if config._otel_trace_semantics_enabled:
+        record_initial_instrumentation_resource(span, ctx.get_item("resource"))
 
     if "datadog" not in scope:
         scope["datadog"] = {"request_spans": [span]}
