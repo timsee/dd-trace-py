@@ -10,6 +10,14 @@ You are free to use the following worktrees:
 - `dogweb`: `/home/bits/go/src/github.com/DataDog/dogweb-dogfooding`
 - `dd-source`: `/home/bits/go/src/github.com/DataDog/dd-source-dogfooding`
 
+Note the default branches differ per repo:
+
+| Repo | Default branch |
+|------|----------------|
+| `dd-trace-py` | `main` |
+| `dd-source` | `main` |
+| `dogweb` | `prod` |
+
 # Pre-flight checks
 
 Before you start working, please check that everything you will possibly need is available.
@@ -17,24 +25,62 @@ Before you start working, please check that everything you will possibly need is
 - Make sure the `dd-trace-py` worktree is clean (no unstaged changes, no new files)
 - Make sure the `dogweb` worktree is clean (no unstaged changes, no new files)
 - Make sure the `dd-source` workree is clean (no unstaged changes, no new files)
-- Check that `ddtool auth gitlab token` gives you a GitLab token that you can use to query
-  the API for `https://gitlab.ddbuild.io`.
 - Check that the `rapid` CLI is available. If not, propose to install it using
   `brew install rapid` on macOS and `update-tool rapid` in workspaces.
+- Check that `bzl` is on the latest version by upgrading it using `dogbrew install bzl`.
+- Check that you can read the ADMS Python prerelease index (see "Finding the dogfooding build"
+  below) — this is how you discover the version to pin.
 
 Any failure in those checks means you should alert the user and not continue!
+
+Note that the worktrees are frequently left behind on a *previous* dogfooding branch, with a stale
+`ddtrace` pin still in `requirements.in`. "Clean" is not the same as "up to date" — always reset
+explicitly to the repo's default branch before editing, and never build a new dogfooding change on
+top of an old one.
 
 # General instructions
 
 During the workflow, if _anything_ goes unexpected (i.e. a command fails, etc.) do NOT try
 to fix the problem yourself. Instead, you should notify the user and ask for guidance.
 
-# How to cut an internal release from `main`
+# Finding the dogfooding build
 
-The CI for `dd-trace-py` makes it easy to create an internal release.
-Simply follow these instructions.
+Dogfooding wheels for every `main` commit are
+published continuously to ADMS, so in the common case there is nothing to build — just pick the
+newest one.
 
-Reset the `kowalski/internal-dogfooding` (if it doesn't exist, create it) to latest `main`
+List the published dogfooding versions, newest first:
+
+```sh
+curl -s "https://depot-read-api-python.us1.ddbuild.io/datadog/pypi-private-prereleases/@current/simple/ddtrace/" \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?\.dev[0-9]+\+internal\.dogfooding\.[0-9a-f]{40}' \
+  | sort -u | sed -E 's/^(.*\.dev([0-9]+)\+.*)$/\2 \1/' | sort -rn | head -5 | cut -d' ' -f2-
+```
+
+Versions look like `<version>.dev<pipeline-id>+internal.dogfooding.<commit-sha>`, for example:
+
+```
+4.16.1.dev145585446+internal.dogfooding.5fa20c605391c5fa0694c2c6dca15040ef0aea5e
+4.17.0rc1.dev145585442+internal.dogfooding.3364f794ad17bc7f17d7cbac90495c4992e890fb
+```
+
+Two things to watch for:
+- **Several release lines are published in parallel** (e.g. `4.16.1` from a release branch and
+  `4.17.0rc1` from `main`). Sorting by pipeline ID alone will mix them. Pick the one matching the
+  branch you actually want to dogfood — normally the highest minor version, which is `main`.
+- **Verify the embedded commit SHA** resolves to a commit on `origin/main` of `dd-trace-py`, and
+  tell the user which commit they are about to dogfood. The SHA is the real identity of the
+  build; the pipeline ID is not.
+
+If the user names a specific version, use it as-is and just verify its SHA — don't go looking for
+a newer one.
+
+## Fallback: cutting an internal release by hand
+
+Only do this when the user needs a build of something that is *not* on `main` (a PR branch, a local
+fix). Otherwise use the ADMS lookup above.
+
+Reset the `kowalski/internal-dogfooding` branch (if it doesn't exist, create it) to latest `main`:
 
 ```sh
 git fetch origin main
@@ -45,19 +91,11 @@ git checkout -B kowalski/internal-dogfooding
 Update the version in `pyproject.toml` to have this local segment.
 
 ```diff
-diff --git a/pyproject.toml b/pyproject.toml
-index d829389822..2288e34160 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
- 
  [project]
  name = "ddtrace"
--version = "4.15.0rc1"
-+version = "4.15.0rc1+internal-dogfooding"
+-version = "4.17.0rc1"
++version = "4.17.0rc1+internal-dogfooding"
  description = "Datadog APM client library"
- readme = "README.md"
- license = { text = "LICENSE.BSD3" }
 ```
 
 Commit the changes and push it.
@@ -72,48 +110,54 @@ Note: force-pushing this branch is OK -- it is only used for my purposes of inte
 Even if we accidentally force-push something that shouldn't have been, we can recover it from
 GitHub history, so don't worry about that.
 
-This will automatically trigger a CI pipeline that will build internal dogfooding wheels on our
-GitLab instance: `https://gitlab.ddbuild.io/DataDog/apm-reliability/dd-trace-py`.
+This triggers a CI pipeline on `https://gitlab.ddbuild.io/DataDog/apm-reliability/dd-trace-py`
+that builds internal dogfooding wheels.
 
-Search for the CI pipeline it creates, specifically the "patch wheels" for `manylinux` under `package`.
-When you find it, please print the link to both jobs (even if they're not started yet).
+Search for the CI pipeline it creates, specifically the "patch wheels" for `manylinux` under
+`package`. When you find it, please print the link to both jobs (even if they're not started yet).
+Note the pipeline is mirrored from GitHub, so it does not appear immediately — poll the API by
+commit SHA until it shows up.
 
 Wait for the jobs to start and finish, then let me know when it's done.
 Check at most every thirty seconds, but more often if you think it's going to end soon.
 
-The "patch wheels" jobs will output the name of the internal dogfooding release, it typically
-includes the pipeline ID and the commit SHA. Make sure the commit SHA matches the one you pushed
-for the `kowalski/internal-dogfooding` branch.
-
-Once you have found the new version name and the wheels have finished pushing, you can proceed to
-the next step.
+The "patch wheels" jobs will output the name of the internal dogfooding release. Make sure the
+commit SHA matches the one you pushed for the `kowalski/internal-dogfooding` branch.
 
 # How to deploy the changes to `dogweb`
 
 ## Updating requirements
 
-Go to the `dogweb` worktree I gave you.
+Go to the `dogweb` worktree I gave you and reset it to the latest default branch. Remember this
+repo's default branch is `prod`.
 
-Update the `ddtrace` version in `requirements.in` to match the one you found in the job, example:
+```sh
+git fetch origin prod
+git checkout origin/prod
+```
+
+Update the `ddtrace` version in `requirements.in` to the one you found, example:
 
 ```diff
-diff --git a/requirements.in b/requirements.in
-index 06eaeaa3d819..411db3898331 100644
---- a/requirements.in
-+++ b/requirements.in
-@@ -380,7 +380,7 @@ crx3==0.0.4
- cryptography===50.0.0  # temporarily pinning for ADMS resolution
- datadog==0.52.1
- dash==3.3.0
--ddtrace==4.11.6
-+ddtrace==4.15.0rc3.dev123456789+internal.dogfooding.abcdefabcdef
- decorator==5.2.1
+-ddtrace==4.16.0rc1
++ddtrace==4.17.0rc1.dev145585442+internal.dogfooding.3364f794ad17bc7f17d7cbac90495c4992e890fb
+ decorator==5.3.1
  defusedxml==0.7.1
- debugpy==1.8.19
 ```
 
 Then, run `rake python:compile_requirements` to update the requirements files.
-This may take a while, but should not fail.
+This takes about 30s and should not fail. It rewrites `requirements3.txt` as well as
+`requirements.in`.
+
+Before committing, check that `ddtrace` is the only package pin that changed:
+
+```sh
+git diff | grep -E "^[-+][a-zA-Z0-9_.-]+==" | sed -E 's/==.*//' | sort -u
+```
+
+If anything other than `ddtrace` appears, stop and tell the user. (Note that grepping the log for
+"error" gives false positives — `rapid-apierrors` and `dashboards-errors-lib` are real package
+names.)
 
 Once this is finished, stage the changes to all requirements files and commit them on a new
 branch.
@@ -127,7 +171,8 @@ git push
 ```
 
 Once that is done, use `gh` to create a PR from the branch.
-This PR should be a draft, not really open.
+- This PR should be a draft, not really open.
+- The PR should target `prod`.
 
 ## Sending changes to `staging`
 
@@ -150,27 +195,50 @@ git fetch origin main
 git checkout origin/main
 ```
 
-Update the `ddtrace` version in `requirements.in` to match the one you found in the job, example:
+Update the `ddtrace` version in `requirements.in` to the one you found, example:
 
 ```diff
-diff --git a/requirements.in b/requirements.in
-index 06eaeaa3d819..411db3898331 100644
---- a/requirements.in
-+++ b/requirements.in
-@@ -380,7 +380,7 @@ crx3==0.0.4
- cryptography===50.0.0  # temporarily pinning for ADMS resolution
- datadog==0.52.1
- dash==3.3.0
--ddtrace==4.11.6
-+ddtrace==4.15.0rc3.dev123456789+internal.dogfooding.abcdefabcdef
- decorator==5.2.1
- defusedxml==0.7.1
- debugpy==1.8.19
+-ddtrace==4.16.0rc2
++ddtrace==4.17.0rc1.dev145585442+internal.dogfooding.3364f794ad17bc7f17d7cbac90495c4992e890fb
+ ddtrace-api==0.0.1
+ decorator==5.3.1
 ```
 
-Then, run `bzl run //:requirements.update` to update the requirements files.
-Note that this may sometimes ask for Google authentication which will block the process.
-You need to keep track of what the process is printing to detect _and tell me_ when it happens.
+Note there is also a `ddtrace-api` pin right next to it — leave that one alone.
+
+Then, run `bzl run //:requirements.update` to update the requirements files. This takes about a
+minute. Two things commonly go wrong, and you must watch the output for both:
+
+- **`bzl` too old.** It prints `bzl is too old to run in this repository` and refuses to do
+  anything. Do not retry it and do not invoke `bazel`/`bazelisk` directly — the tool explicitly
+  tells you not to. Report it and ask the user before upgrading.
+- **OIDC / Vault authentication.** It prints a device-login prompt that *blocks the build*:
+
+  ```
+  Complete the login via your OIDC provider. Open the following link in your browser:
+      https://www.google.com/device
+  Waiting for OIDC authentication to complete...
+  When prompted, enter code XXXX-XXXX
+  ```
+
+  **Tell the user immediately and relay the code** — device codes expire in minutes. Watch the log
+  rather than waiting silently for the command to exit.
+
+  If nobody completes the login, it fails with `Vault login failed. Expired or missing OAuth
+  state.` and warns `Build will likely fail or hang`. Despite that warning the build often still
+  **succeeds** off the local/remote cache. Treat a success here as unverified against the live
+  index: confirm the lockfile really picked up the new version before trusting it.
+
+Verify the result the same way as for dogweb — `ddtrace` should be the only package pin that
+changed in `requirements.txt`:
+
+```sh
+git diff origin/main HEAD -- requirements.txt | grep -E "^[-+][a-zA-Z0-9_.-]+==" | sed -E 's/==.*//' | sort -u
+```
+
+Expect a fairly large line count in that file even for a one-package change (~80 lines), because
+the dogfooding wheel ships a different set of platform hashes and `# via` comments than a released
+version. That churn is benign; a second changed *package pin* is not.
 
 Once this is finished, stage the changes to all requirements files and commit them on a new
 branch.
@@ -224,7 +292,7 @@ If the user wants to send the changes to staging (shared integration branch), us
 ```sh
 # Before running this, always ensure a PR already exists for the branch
 ddr devflow --no-interactive integrate -s <service_name>
-# If the command asks whether you want to push the local changes, it's a bug
+# If the command asks whether you want to push the local changes, it's a bug
 # don't push anything!
 ```
 
