@@ -85,6 +85,7 @@ class ProfilingRCCallback(RCCallback):
                 merged_config,
             )
             previous_profiling_remote_configuration = merged_config
+            _restart_profiler(merged_config["profilers"])
             return
 
         if previous_profiling_remote_configuration == merged_config:
@@ -96,7 +97,29 @@ class ProfilingRCCallback(RCCallback):
         # Stop the Profiler and restart it
         previous_profiling_remote_configuration = merged_config
         log.debug("[profiling-remote-config] Restarting the Profiler with the new settings: %s", merged_config)
-        # TODO...
+        _restart_profiler(merged_config["profilers"])
+
+
+def _restart_profiler(profilers: dict[str, bool]) -> None:
+    from ddtrace.profiling import bootstrap
+    from ddtrace.profiling.profiler import Profiler
+
+    current: t.Optional[Profiler] = getattr(bootstrap, "profiler", None)
+    if current is not None:
+        current.stop(flush=True)
+        del bootstrap.profiler
+
+    if not any(profilers.values()):
+        return
+
+    new_profiler = Profiler(
+        _stack_collector_enabled=profilers["stack"],
+        _memory_collector_enabled=profilers["memory"],
+        _lock_collector_enabled=profilers["lock"],
+        _exception_profiling_enabled=profilers["exception"],
+    )
+    bootstrap.profiler = new_profiler
+    new_profiler.start()
 
 
 def post_preload() -> None:
