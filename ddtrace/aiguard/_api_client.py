@@ -18,7 +18,9 @@ from ddtrace.aiguard._types import Function  # noqa:F401
 from ddtrace.aiguard._types import ImageURL  # noqa:F401
 from ddtrace.aiguard._types import Message
 from ddtrace.aiguard._types import ToolCall  # noqa:F401
+from ddtrace.contrib.internal.trace_utils_base import set_client_address_tags
 from ddtrace.ext import http
+from ddtrace.ext import net
 from ddtrace.internal import core
 from ddtrace.internal import span_bus
 from ddtrace.internal import telemetry
@@ -30,6 +32,7 @@ from ddtrace.internal.native import HttpClientError
 from ddtrace.internal.native import HttpIoError
 from ddtrace.internal.native import InvalidConfigError
 from ddtrace.internal.native import TimedOutError
+from ddtrace.internal.otel_semantics import http as otel_http
 from ddtrace.internal.settings.aiguard import aiguard_config
 from ddtrace.internal.telemetry import TELEMETRY_NAMESPACE
 from ddtrace.internal.telemetry.constants import MetricTagType
@@ -47,6 +50,12 @@ DENY = "DENY"
 ABORT = "ABORT"
 ACTIONS = [ALLOW, DENY, ABORT]
 _RESERVED_TAG_PREFIX = AI_GUARD.TAG + "."
+# Root span tags that anomaly detection reads under their OTel names when OTel semantics are enabled.
+_OTEL_ANOMALY_SOURCE_TAGS = {
+    http.USER_AGENT: otel_http.USER_AGENT_ORIGINAL,
+    http.CLIENT_IP: otel_http.CLIENT_ADDRESS,
+    net.CLIENT_IP: otel_http.NETWORK_PEER_ADDRESS,
+}
 
 
 class Evaluation(TypedDict):
@@ -475,14 +484,13 @@ class AIGuardClient:
                     core.discard_item(AI_GUARD.CLIENT_IP_CORE_KEY)
                     if client_ips:
                         client_ip, peer_ip = client_ips
-                        root_span._set_attribute(http.CLIENT_IP, client_ip)
-                        if peer_ip:
-                            root_span._set_attribute("network.client.ip", peer_ip)
+                        set_client_address_tags(root_span, client_ip, peer_ip)
                     # Copy anomaly-detection attributes from the root span onto the
                     # ai_guard span with the `ai_guard.` prefix, so intake processing has them
                     # even when the root span arrives in a later trace chunk.
+                    source_tags = _OTEL_ANOMALY_SOURCE_TAGS if config._otel_trace_semantics_enabled else {}
                     for tag_name in AI_GUARD.ANOMALY_DETECTION_TAGS:
-                        tag_value = root_span.get_tag(tag_name)
+                        tag_value = root_span.get_tag(source_tags.get(tag_name, tag_name))
                         if tag_value is not None:
                             span.set_tag(f"{AI_GUARD.TAG}.{tag_name}", tag_value)
                 if should_block:
