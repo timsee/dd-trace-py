@@ -4,11 +4,13 @@ from collections.abc import Sequence
 import logging
 import typing as t
 
+from ddtrace.internal import _unpatched
 from ddtrace.internal.logger import get_logger
 from ddtrace.internal.native import RemoteConfigProduct
 from ddtrace.internal.remoteconfig import Payload
 from ddtrace.internal.remoteconfig import RCCallback
-from ddtrace.internal.settings.profiling import config as profiling_config
+from ddtrace.internal.service import ServiceStatus
+from ddtrace.internal.settings._config import config as global_config
 
 
 log = get_logger(__name__)
@@ -23,6 +25,15 @@ requires: list[str] = ["remote-configuration"]
 debug_configs: dict[str, dict[str, t.Any]] = {}
 
 previous_profiling_remote_configuration: t.Optional[dict[str, t.Any]] = None
+
+# This Lock is used to serialise Profiler object swaps.
+# We don't need a forksafe lock, because forks can never interrupt a swap. The before-fork hook in
+# ddtrace.internal.threads joins every PeriodicThread, including the remote config poller and
+# subscriber, and a PeriodicThread only stops between two callbacks. So there is no need to hold
+# this lock across forks.
+# uWSGI forks workers in C without running the before-fork hooks; that fork can happen mid-swap,
+# which is why restart replaces the lock in the child.
+_lock: _unpatched.threading_Lock = _unpatched.threading_Lock()
 
 
 def _get_default_config() -> dict[str, t.Any]:
@@ -58,7 +69,8 @@ class ProfilingRCCallback(RCCallback):
                 "[profiling-remote-config] No Profiling-related DEBUG RC configs, falling back to default settings."
             )
 
-        self.handle_profiling_configs(profiling_configs)
+        with _lock:
+            self.handle_profiling_configs(profiling_configs)
 
     def handle_profiling_configs(self, configs: list[dict[str, t.Any]]) -> None:
         """Merges all the Remote Config files that were sent to the Tracer."""
@@ -66,13 +78,10 @@ class ProfilingRCCallback(RCCallback):
 
         merged_config: dict[str, t.Any] = _get_default_config()
 
-        # This needs to be done from "least specific scope" to "most specific scope"
+        # TODO: This needs to be done from "least specific scope" to "most specific scope"
         for config in configs:
             for key, value in config.get("profilers", {}).items():
                 enabled_in_new = value is True
-                if enabled_in_new is None:
-                    continue
-
                 if enabled_in_new:
                     merged_config["profilers"][key] = value
 
@@ -84,8 +93,8 @@ class ProfilingRCCallback(RCCallback):
                 ),
                 merged_config,
             )
-            previous_profiling_remote_configuration = merged_config
-            _restart_profiler(merged_config["profilers"])
+            if _restart_profiler(merged_config["profilers"]):
+                previous_profiling_remote_configuration = merged_config
             return
 
         if previous_profiling_remote_configuration == merged_config:
@@ -95,12 +104,13 @@ class ProfilingRCCallback(RCCallback):
             return
 
         # Stop the Profiler and restart it
-        previous_profiling_remote_configuration = merged_config
         log.debug("[profiling-remote-config] Restarting the Profiler with the new settings: %s", merged_config)
-        _restart_profiler(merged_config["profilers"])
+        if _restart_profiler(merged_config["profilers"]):
+            previous_profiling_remote_configuration = merged_config
 
 
-def _restart_profiler(profilers: dict[str, bool]) -> None:
+def _restart_profiler(profilers: dict[str, bool]) -> bool:
+    """Replace the bootstrap profiler. Return False if the new profiler did not start, so the next payload retries."""
     from ddtrace.profiling import bootstrap
     from ddtrace.profiling.profiler import Profiler
 
@@ -110,16 +120,32 @@ def _restart_profiler(profilers: dict[str, bool]) -> None:
         del bootstrap.profiler
 
     if not any(profilers.values()):
-        return
+        return True
 
-    new_profiler = Profiler(
-        _stack_collector_enabled=profilers["stack"],
-        _memory_collector_enabled=profilers["memory"],
-        _lock_collector_enabled=profilers["lock"],
-        _exception_profiling_enabled=profilers["exception"],
-    )
+    active: t.Optional[Profiler] = Profiler._active_instance
+    if active is not None and active._profiler.status == ServiceStatus.RUNNING:
+        log.warning("[profiling-remote-config] A profiler not owned by remote config is running, not starting one.")
+        return False
+
+    try:
+        new_profiler = Profiler(
+            _stack_collector_enabled=profilers["stack"],
+            _memory_collector_enabled=profilers["memory"],
+            _lock_collector_enabled=profilers["lock"],
+            _exception_profiling_enabled=profilers["exception"],
+        )
+        new_profiler.start()
+    except Exception:
+        log.exception("[profiling-remote-config] Failed to start the Profiler")
+        return False
+
+    # Profiler.start returns without an error when another profiler won the race to become active.
+    if new_profiler._profiler.status != ServiceStatus.RUNNING:
+        log.warning("[profiling-remote-config] The Profiler did not start.")
+        return False
+
     bootstrap.profiler = new_profiler
-    new_profiler.start()
+    return True
 
 
 def post_preload() -> None:
@@ -127,7 +153,7 @@ def post_preload() -> None:
 
 
 def enabled() -> bool:
-    return profiling_config.enabled
+    return bool(global_config._remote_config_enabled)
 
 
 def start() -> None:
@@ -138,7 +164,10 @@ def start() -> None:
 
 
 def restart(join: bool = False) -> None:
-    pass
+    # A uWSGI fork can happen while the remote config thread holds the lock; that thread does not exist in the child.
+    global _lock
+
+    _lock = _unpatched.threading_Lock()
 
 
 def stop(join: bool = False) -> None:
