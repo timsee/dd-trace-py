@@ -14,7 +14,7 @@ from ddtrace.internal.settings._config import config as global_config
 
 
 log = get_logger(__name__)
-_handler: logging.StreamHandler = logging.StreamHandler()
+_handler: "logging.StreamHandler[t.TextIO]" = logging.StreamHandler()
 _handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
 log.addHandler(_handler)
 log.propagate = False
@@ -53,9 +53,6 @@ class ProfilingRCCallback(RCCallback):
         log.debug("[profiling-remote-config] Received %d DEBUG RC payloads %s", len(payloads), payloads)
 
         for payload in payloads:
-            if payload.metadata is None:
-                continue
-
             if payload.content is None:
                 debug_configs.pop(payload.metadata.id, None)
             else:
