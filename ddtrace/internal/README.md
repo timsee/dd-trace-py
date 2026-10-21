@@ -6,6 +6,11 @@ These modules are not intended to be used outside of `ddtrace`.
 The APIs found within `ddtrace.internal` are subject to breaking changes at any time
 and do not follow the semver versioning scheme of the `ddtrace` package.
 
+Products whose diagnostics must not interrupt their lifecycle can opt into
+`ddtrace.internal.logger.get_safe_logger`. It preserves call-site rate limiting
+and drops exceptions from record creation, filters, formatting and handlers.
+It does not inspect log arguments when the log level is disabled.
+
 ## Coverage collection contexts
 
 `ModuleCodeCollector.CollectInContext` owns the line and file coverage for one
